@@ -96,12 +96,15 @@ def fit_price_model(df):
     n = len(df)
     np.random.seed(1)
     model_df = pd.DataFrame({
-        'price_ratio': np.clip(1 - np.random.beta(2,5,size=n),0.05,1),
+        'price_ratio': np.clip(1 - np.random.beta(2,5,size=n), 0.05, 1.0),
         'n_generics': np.random.poisson(lam=3, size=n),
         'drug_class': df['drug_class']
     })
-    encoder = OneHotEncoder(sparse=False, handle_unknown='ignore')
-    Xc = encoder.fit_transform(model_df[['drug_class']])
+    # One-hot encode drug_class, ensuring dense output
+    encoder = OneHotEncoder(handle_unknown='ignore')
+    Xc_sparse = encoder.fit_transform(model_df[['drug_class']])
+    Xc = Xc_sparse.toarray()
+    # Combine features
     X = np.hstack([Xc, model_df[['n_generics']].values])
     y = model_df['price_ratio'].values
     model = BayesianRidge()
