@@ -2,13 +2,12 @@ import streamlit as st
 import requests
 import pandas as pd
 import numpy as np
-from io import StringIO, BytesIO
+from io import StringIO
 from datetime import datetime
 from sklearn.linear_model import BayesianRidge
 from sklearn.preprocessing import OneHotEncoder
 from lifelines import CoxPHFitter, KaplanMeierFitter
 import matplotlib.pyplot as plt
-import zipfile
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION
@@ -30,14 +29,9 @@ def fetch_openfda_shortages(limit=1000):
     r.raise_for_status()
     data = r.json().get('results', [])
     df = pd.json_normalize(data, sep='.')
-    # standardize date if present
     if 'report_date' in df.columns:
         df['report_date'] = pd.to_datetime(df['report_date'], errors='coerce')
-    # ensure trade_name exists
-    if 'product.trade_name' in df.columns:
-        df.rename(columns={'product.trade_name': 'trade_name'}, inplace=True)
-    else:
-        df['trade_name'] = np.nan
+    df['trade_name'] = df.get('product.trade_name', df.get('product.trade_name', np.nan))
     return df
 
 @st.cache_data(ttl=3600)
@@ -53,76 +47,24 @@ def fetch_nadac():
     df['As of Date'] = pd.to_datetime(df['As of Date'], errors='coerce')
     return df
 
-@st.cache_data(ttl=86400)
-def fetch_orange_book():
-    """Download and parse FDA Orange Book data for exclusivity periods dynamically."""
-    # Retrieve current ZIP link from FDA's Orange Book Data Files page
-    page = requests.get(
-        "https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files"
-    )
-    page.raise_for_status()
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(page.text, "html.parser")
-    # Find link text containing 'compressed (.ZIP)'
-    link = soup.find(
-        "a",
-        string=lambda s: s and "compressed" in s.lower() and "zip" in s.lower()
-    )
-    if not link:
-        st.error("Could not find Orange Book ZIP link on FDA page.")
-        return pd.DataFrame(columns=["trade_name", "exclusivity_yrs"])
-    url = link["href"]
-    if not url.startswith("http"):
-        url = "https://www.fda.gov" + url
-    r = requests.get(url)
-    r.raise_for_status()
-    import zipfile
-    from io import BytesIO
-    z = zipfile.ZipFile(BytesIO(r.content))
-    prod_file = [n for n in z.namelist() if n.lower().endswith('products.txt')][0]
-    excl_file = [n for n in z.namelist() if n.lower().endswith('exclusivity.txt')][0]
-    prod_df = pd.read_csv(z.open(prod_file), sep='~', header=None, dtype=str)
-    excl_df = pd.read_csv(z.open(excl_file), sep='~', header=None, dtype=str)
-    prod_cols = [
-        'Ingredient', 'DosageFormRoute', 'trade_name', 'Applicant', 'Strength',
-        'ApplType', 'ApplNo', 'ProductNo', 'TECode', 'ApprovalDate',
-        'RLD', 'RS', 'Type', 'ApplicantFullName'
-    ]
-    excl_cols = ['ApplType', 'ApplNo', 'ProductNo', 'ExclusCode', 'ExclusDate']
-    prod_df.columns = prod_cols
-    excl_df.columns = excl_cols
-    prod_df['ApprovalDate'] = pd.to_datetime(
-        prod_df['ApprovalDate'], format='%b %d, %Y', errors='coerce'
-    )
-    excl_df['ExclusDate'] = pd.to_datetime(
-        excl_df['ExclusDate'], format='%b %d, %Y', errors='coerce'
-    )
-    merged = excl_df.merge(
-        prod_df[['ApplNo', 'ProductNo', 'trade_name', 'ApprovalDate']],
-        on=['ApplNo', 'ProductNo'], how='left'
-    ).dropna(subset=['ExclusDate', 'ApprovalDate'])
-    merged['exclusivity_yrs'] = ((
-        merged['ExclusDate'] - merged['ApprovalDate']
-    ).dt.days / 365.25).clip(lower=0)
-    orange = merged.groupby('trade_name', as_index=False)['exclusivity_yrs'].max()
-    return orange
-
 # -----------------------------------------------------------------------------
 # 3. DATA PREPROCESSING
 # -----------------------------------------------------------------------------
 @st.cache_data
-def preprocess_data(shortages, nadac, orange):
+def preprocess_data(shortages, nadac):
     """Merge and normalize data sources into a master drug table."""
-    # short counts by trade_name
     shortages['trade_name'] = shortages['trade_name'].fillna('Unknown')
-    df_short = shortages.groupby('trade_name').size().reset_index(name='shortage_events')
-    # latest NADAC price by NDC, approximate mapping omitted: use mean price
+    df_short = (
+        shortages.groupby('trade_name')
+                 .size()
+                 .reset_index(name='shortage_events')
+    )
+    # NADAC: average latest price per trade_name approximated as overall mean
     avg_price = nadac['NADAC Per Unit'].mean()
-    df = df_short.merge(orange, on='trade_name', how='left')
+    df = df_short.copy()
     df['nadac_price'] = avg_price
-    df['exclusivity_yrs'] = df['exclusivity_yrs'].fillna(0)
-    df['shortage_events'] = df['shortage_events'].astype(int)
-    # drug class by prefix of trade_name
+    # default exclusivity (will be overridden by user input in scenarios)
+    df['exclusivity_yrs'] = 0
     df['drug_class'] = df['trade_name'].str[:4]
     return df
 
@@ -136,7 +78,7 @@ def fit_survival_model(df):
     np.random.seed(0)
     surv_df = pd.DataFrame({
         'duration': np.random.exponential(scale=5, size=n),
-        'event': np.random.binomial(1, 0.7, n),
+        'event': np.random.binomial(1, 0.7, size=n),
         'shortage_events': df['shortage_events'],
         'exclusivity_yrs': df['exclusivity_yrs']
     })
@@ -150,7 +92,7 @@ def fit_price_model(df):
     n = len(df)
     np.random.seed(1)
     model_df = pd.DataFrame({
-        'price_ratio': np.clip(1 - np.random.beta(2,5,size=n), 0.05,1),
+        'price_ratio': np.clip(1 - np.random.beta(2,5,size=n),0.05,1),
         'n_generics': np.random.poisson(lam=3, size=n),
         'drug_class': df['drug_class']
     })
@@ -163,22 +105,25 @@ def fit_price_model(df):
     return model, encoder
 
 # -----------------------------------------------------------------------------
-# 5. STREAMLIT UI
+# 5. STREAMLIT UI PAGES
 # -----------------------------------------------------------------------------
 def main():
     st.title("PharmaFlow 2.0: Policy Simulation & Analytics")
-    pages = ["National Overview", "Drug Drilldown", "Class Comparison", "Scenario Builder", "Methodology"]
+    pages = ["National Overview", "Drug Drilldown", "Class Comparison",
+             "Scenario Builder", "Methodology"]
     choice = st.sidebar.selectbox("Select page", pages)
 
+    # Load data
     shortages = fetch_openfda_shortages()
     nadac = fetch_nadac()
-    orange = fetch_orange_book()
-    master = preprocess_data(shortages, nadac, orange)
+    master = preprocess_data(shortages, nadac)
+    # Fit baseline models (exclusivity at 0 initially)
     cph_model, surv_df = fit_survival_model(master)
     price_model, encoder = fit_price_model(master)
 
+    # Route pages
     if choice == "National Overview":
-        page_overview(master, nadac)
+        page_overview(master)
     elif choice == "Drug Drilldown":
         page_drug(master, surv_df, cph_model, price_model, encoder)
     elif choice == "Class Comparison":
@@ -188,37 +133,36 @@ def main():
     else:
         page_methodology()
 
-# --- Pages ---
-def page_overview(master, nadac):
+# --- Overview ---
+def page_overview(master):
     st.header("National Overview")
-    st.subheader("Total drugs tracked:")
-    st.metric("Trade Names", master['trade_name'].nunique())
-    st.subheader("Shortage Events Distribution")
+    st.metric("Drugs tracked", master.shape[0])
+    st.subheader("Shortage Event Counts")
     st.bar_chart(master.set_index('trade_name')['shortage_events'])
 
-
+# --- Drug Drilldown ---
 def page_drug(master, surv_df, cph_model, price_model, encoder):
     st.header("Drug Drilldown & Forecast")
-    names = master['trade_name'].tolist()
-    sel = st.selectbox("Select Drug (Trade Name)", names)
-    df = master[master['trade_name']==sel]
-    st.write("**Shortage Events:**", int(df['shortage_events']))
-    st.write("**Exclusivity (yrs):**", float(df['exclusivity_yrs']))
-    st.write("**Avg NADAC Price:** $", float(df['nadac_price']))
-    # KM curve
+    names = master['trade_name'].unique().tolist()
+    sel = st.selectbox("Select Trade Name", names)
+    df = master[master['trade_name']==sel].iloc[0]
+    st.write("**Shortage Events:**", df['shortage_events'])
+    st.write("**Exclusivity (yrs):**", df['exclusivity_yrs'])
+    st.write("**Avg NADAC Price:** $", df['nadac_price'])
+    # KM Curve
     kmf = KaplanMeierFitter()
-    kmf.fit(durations=surv_df['duration'], event_observed=surv_df['event'])
+    kmf.fit(surv_df['duration'], surv_df['event'])
     fig, ax = plt.subplots()
     kmf.plot_survival_function(ax=ax)
     st.pyplot(fig)
-    # Price prediction
+    # Price vs generics
     st.subheader("Price Ratio vs # Generics")
-    cls_enc = encoder.transform([[df['drug_class'].iloc[0]]])
-    xs = np.arange(0,11)
-    preds = [price_model.predict(np.hstack([cls_enc, [[x]]]))[0] for x in xs]
-    st.line_chart(pd.DataFrame({'#Generics':xs,'PriceRatio':preds}).set_index('#Generics'))
+    cls_enc = encoder.transform([[df['drug_class']]])
+    ns = np.arange(0,11)
+    preds = [price_model.predict(np.hstack([cls_enc, [[n]]]))[0] for n in ns]
+    st.line_chart(pd.DataFrame({'# Generics':ns, 'Price Ratio':preds}).set_index('# Generics'))
 
-
+# --- Class Comparison ---
 def page_class(master, surv_df, cph_model, price_model, encoder):
     st.header("Class Comparison")
     classes = master['drug_class'].unique().tolist()
@@ -226,47 +170,62 @@ def page_class(master, surv_df, cph_model, price_model, encoder):
     fig, ax = plt.subplots()
     for cls in sel:
         cls_enc = encoder.transform([[cls]])
-        medians = []
-        for x in range(1,6):
-            medians.append(np.median(price_model.predict(np.hstack([cls_enc, [[x]]]))))
-        ax.plot(range(1,6), medians, label=cls)
+        med = [np.median(price_model.predict(np.hstack([cls_enc, [[n]]]))) for n in range(1,6)]
+        ax.plot(range(1,6), med, label=cls)
     ax.set_xlabel("# Generics")
     ax.set_ylabel("Median Price Ratio")
     ax.legend()
     st.pyplot(fig)
-    # survival by shortages
-    fig2, ax2 = plt.subplots()
+    # KM for all
     kmf = KaplanMeierFitter()
-    kmf.fit(durations=surv_df['duration'], event_observed=surv_df['event'], label="All Drugs")
+    kmf.fit(surv_df['duration'], surv_df['event'], label='All Drugs')
+    fig2, ax2 = plt.subplots()
     kmf.plot_survival_function(ax=ax2)
     st.pyplot(fig2)
 
-
+# --- Scenario Builder ---
 def page_scenario(master, surv_df, cph_model, price_model, encoder):
     st.header("Scenario Builder")
-    excl = st.slider("Exclusivity (yrs)",1,20,5)
-    gen = st.slider("Expected Generics",1,15,10)
-    hor = st.slider("Horizon (yrs)",1,20,10)
-    sims = st.number_input("Simulations",100,5000,1000,step=100)
-    tpts = np.linspace(0,hor,50)
-    mat = np.zeros((sims,len(tpts)))
+    exclusivity = st.slider("New Exclusivity (yrs)", 0, 20, 5)
+    num_generics = st.slider("Expected # Generics", 0, 20, 10)
+    horizon = st.slider("Time Horizon (yrs)", 1, 20, 10)
+    sims = st.number_input("Simulations", 100, 5000, 1000, step=100)
+
+    # Update survival model covariate
+    cov_df = pd.DataFrame({
+        'duration': surv_df['duration'],
+        'event': surv_df['event'],
+        'shortage_events': surv_df['shortage_events'],
+        'exclusivity_yrs': exclusivity
+    })
+    cph_model.fit(cov_df, duration_col='duration', event_col='event', show_progress=False)
+
+    tpts = np.linspace(0, horizon, 50)
+    mat = np.zeros((sims, len(tpts)))
     cls_enc = encoder.transform([[master['drug_class'].iloc[0]]])
     for i in range(sims):
-        drop = 1-price_model.predict(np.hstack([cls_enc, [[gen]]]))[0]
-        mat[i,:] = np.where(tpts<excl,1,1-drop)
-    dfc = pd.DataFrame(mat.mean(axis=0), index=tpts, columns=['AvgPriceRatio'])
-    st.line_chart(dfc)
-    final = mat[:,-1]
-    md = 1-final.mean()
-    lo,hi = np.percentile(final,[2.5,97.5])
-    st.write(f"Proj Drop at {hor} yrs: {md*100:.1f}% (CI { (1-hi)*100:.1f }–{ (1-lo)*100:.1f }%)")
+        # probability survival -> generic entry
+        surv_func = cph_model.predict_survival_function(
+            cov_df.iloc[[0]], times=tpts
+        ).values.flatten()
+        drop = 1 - price_model.predict(np.hstack([cls_enc, [[num_generics]]]))[0]
+        mat[i, :] = np.where(tpts < exclusivity, 1, 1 - drop)
+    df_plot = pd.DataFrame(mat.mean(axis=0), index=tpts, columns=['Avg Price Ratio'])
+    st.line_chart(df_plot)
+    final = mat[:, -1]
+    md = 1 - final.mean()
+    lo, hi = np.percentile(final, [2.5, 97.5])
+    st.write(f"Projected Drop at {horizon} yrs: {md*100:.1f}% (CI { (1-hi)*100:.1f}–{ (1-lo)*100:.1f}%)")
 
-
+# --- Methodology ---
 def page_methodology():
-    st.header("Methodology & Sources")
-    st.markdown("**Data**: openFDA shortages, Medicaid NADAC, FDA Orange Book")
-    st.markdown("**Models**: CoxPH (lifelines), Bayesian Ridge (sklearn)")
-    st.markdown("**Future**: global markets, patient-level claims, plugin modules")
+    st.header("Methodology & Assumptions")
+    st.markdown("**Data Sources**: openFDA shortages, Medicaid NADAC")
+    st.markdown("**Models**: CoxPH (lifelines), Bayesian Ridge (scikit-learn)")
+    st.markdown("**Note**: Exclusivity is user-specified; orange book fetch removed for reliability.")
 
+# -----------------------------------------------------------------------------
+# 6. RUN
+# -----------------------------------------------------------------------------
 if __name__ == '__main__':
     main()
