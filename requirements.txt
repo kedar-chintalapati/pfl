@@ -1,17 +1,7 @@
-streamlit==1.44.1
-pandas==2.2.3
-numpy==1.26.3
-requests==2.32.3
-
-# Survival & ML
-lifelines==0.30.0
-scikit-learn==1.6.1
-statsmodels==0.14.0
-
-# Plotting
-matplotlib==3.10.1
-seaborn==0.13.2
-
-# Orchestration & PDF
-prefect==3.3.5
-fpdf==1.7.2
+streamlit
+requests
+pandas
+numpy
+scikit-learn
+lifelines
+matplotlib
