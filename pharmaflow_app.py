@@ -38,6 +38,7 @@ def price_drop_mean(n):
     else:
         return 0.95
 
+# App title
 st.title("PharmaFlow: Modeling FDA Policy Impacts on Drug Prices & Availability")
 
 # === Section 1: Live Drug Shortage Data ===
@@ -46,7 +47,7 @@ shortage_df = fetch_shortage_data(100)
 if not shortage_df.empty:
     cols = shortage_df.columns
 
-    # auto‑detect relevant fields
+    # Auto-detect relevant fields
     name_col   = next((c for c in cols if "product" in c.lower() and "name" in c.lower()), None)
     dosage_col = next((c for c in cols if "dosage" in c.lower()), None)
     route_col  = next((c for c in cols if "route" in c.lower()), None)
@@ -61,36 +62,29 @@ if not shortage_df.empty:
 else:
     st.write("No shortage data available at the moment.")
 
-# === Section 2: NADAC pricing trends ===
+# === Section 2: NADAC Pricing Trends ===
 st.markdown("## 2. Current Medicaid NADAC Pricing Trends")
 nadac_df = fetch_nadac_data()
-if {"NDC", "NADAC Per Unit", "As of Date"}.issubset(nadac_df.columns):
-    st.dataframe(nadac_df[["NDC", "NADAC Per Unit", "As of Date"]].head(10))
+expected_cols = {"NDC", "NADAC Per Unit", "As of Date"}
+if expected_cols.issubset(nadac_df.columns):
+    st.dataframe(nadac_df[list(expected_cols)].head(10))
     baseline = nadac_df["NADAC Per Unit"].mean()
     st.markdown(f"**Average NADAC price per unit:** ${baseline:.2f}")
 else:
     st.write("Unexpected NADAC data format.")
 
-# === Sidebar: Policy levers & data sources ===
+# === Sidebar: Policy Levers & Data Sources ===
 st.sidebar.header("Policy Levers & Simulation Parameters")
 new_exclusivity = st.sidebar.slider("New exclusivity (years)", 5.0, 20.0, 12.0, 1.0)
 num_competitors = st.sidebar.slider("Number of generic competitors", 1, 10, 1, 1)
 horizon         = st.sidebar.slider("Simulation horizon (years)", 1, 10, 3, 1)
 n_sim           = st.sidebar.number_input("Monte Carlo simulations", 100, 10000, 1000, 100)
 
-st.sidebar.markdown("### Data Sources")
-st.sidebar.markdown(
-    "- FDA Drug Shortages API: https://open.fda.gov/apis/drug/shortage/"
-)
-st.sidebar.markdown(
-    "- Medicaid NADAC pricing CSV: https://data.medicaid.gov/resource/4d7af295.csv"
-)
-st.sidebar.markdown(
-    "- Generic competition & price-drop meta-analysis (FDA study)"
-)
-st.sidebar.markdown(
-    "- Generic-entry delay industry report"
-)
+st.sidebar.header("Data Sources")
+st.sidebar.text("FDA Drug Shortages API: https://open.fda.gov/apis/drug/shortage/")
+st.sidebar.text("Medicaid NADAC pricing CSV: https://data.medicaid.gov/resource/4d7af295.csv")
+st.sidebar.text("Generic competition & price-drop meta-analysis (FDA study)")
+st.sidebar.text("Generic-entry delay industry report")
 
 # === Section 3: Monte Carlo Simulation ===
 st.markdown("## 3. Monte Carlo Simulation of Price Outcomes")
@@ -117,9 +111,9 @@ lower, upper = np.percentile(final, [2.5, 97.5])
 ci_lo = 1 - upper
 ci_hi = 1 - lower
 
-st.markdown(f"### Projected Price Drop at {horizon} years")
-st.markdown(f"- **Mean drop:** {mean_drop*100:.1f}%")
-st.markdown(f"- **95% CI:** [{ci_lo*100:.1f}%, {ci_hi*100:.1f}%]")
+st.markdown(f"### Projected Price Drop at {horizon} years")
+st.markdown(f"- Mean drop: {mean_drop*100:.1f}%")
+st.markdown(f"- 95% CI: [{ci_lo*100:.1f}%, {ci_hi*100:.1f}%]")
 
 # === Section 4: Caveats & Next Steps ===
 st.markdown("## 4. Model Caveats & Next Steps")
