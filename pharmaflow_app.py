@@ -55,36 +55,56 @@ def fetch_nadac():
 
 @st.cache_data(ttl=86400)
 def fetch_orange_book():
-    """Download and parse FDA Orange Book data for exclusivity periods."""
-    zip_url = "https://www.fda.gov/media/76860/download?attachment="
-    r = requests.get(zip_url)
+    """Download and parse FDA Orange Book data for exclusivity periods dynamically."""
+    # Retrieve current ZIP link from FDA's Orange Book Data Files page
+    page = requests.get(
+        "https://www.fda.gov/drugs/drug-approvals-and-databases/orange-book-data-files"
+    )
+    page.raise_for_status()
+    from bs4 import BeautifulSoup
+    soup = BeautifulSoup(page.text, "html.parser")
+    # Find link text containing 'compressed (.ZIP)'
+    link = soup.find(
+        "a",
+        string=lambda s: s and "compressed" in s.lower() and "zip" in s.lower()
+    )
+    if not link:
+        st.error("Could not find Orange Book ZIP link on FDA page.")
+        return pd.DataFrame(columns=["trade_name", "exclusivity_yrs"])
+    url = link["href"]
+    if not url.startswith("http"):
+        url = "https://www.fda.gov" + url
+    r = requests.get(url)
     r.raise_for_status()
+    import zipfile
+    from io import BytesIO
     z = zipfile.ZipFile(BytesIO(r.content))
-    # find relevant files
-    prod_file = [n for n in z.namelist() if n.endswith('Products.txt')][0]
-    excl_file = [n for n in z.namelist() if n.endswith('Exclusivity.txt')][0]
+    prod_file = [n for n in z.namelist() if n.lower().endswith('products.txt')][0]
+    excl_file = [n for n in z.namelist() if n.lower().endswith('exclusivity.txt')][0]
     prod_df = pd.read_csv(z.open(prod_file), sep='~', header=None, dtype=str)
     excl_df = pd.read_csv(z.open(excl_file), sep='~', header=None, dtype=str)
-    # assign column names based on FDA schema
     prod_cols = [
-        'Ingredient', 'DosageFormRoute', 'TradeName', 'Applicant', 'Strength',
+        'Ingredient', 'DosageFormRoute', 'trade_name', 'Applicant', 'Strength',
         'ApplType', 'ApplNo', 'ProductNo', 'TECode', 'ApprovalDate',
         'RLD', 'RS', 'Type', 'ApplicantFullName'
     ]
     excl_cols = ['ApplType', 'ApplNo', 'ProductNo', 'ExclusCode', 'ExclusDate']
     prod_df.columns = prod_cols
     excl_df.columns = excl_cols
-    # parse dates
-    prod_df['ApprovalDate'] = pd.to_datetime(prod_df['ApprovalDate'], format='%b %d, %Y', errors='coerce')
-    excl_df['ExclusDate'] = pd.to_datetime(excl_df['ExclusDate'], format='%b %d, %Y', errors='coerce')
-    # combine and compute exclusivity
+    prod_df['ApprovalDate'] = pd.to_datetime(
+        prod_df['ApprovalDate'], format='%b %d, %Y', errors='coerce'
+    )
+    excl_df['ExclusDate'] = pd.to_datetime(
+        excl_df['ExclusDate'], format='%b %d, %Y', errors='coerce'
+    )
     merged = excl_df.merge(
-        prod_df[['ApplNo', 'ProductNo', 'TradeName', 'ApprovalDate']],
+        prod_df[['ApplNo', 'ProductNo', 'trade_name', 'ApprovalDate']],
         on=['ApplNo', 'ProductNo'], how='left'
-    ).dropna(subset=['ExclusDate','ApprovalDate'])
-    merged['exclusivity_yrs'] = ((merged['ExclusDate'] - merged['ApprovalDate']).dt.days / 365.25).clip(lower=0)
-    orange = merged.groupby('TradeName', as_index=False)['exclusivity_yrs'].max()
-    orange.rename(columns={'TradeName':'trade_name'}, inplace=True)
+    ).dropna(subset=['ExclusDate', 'ApprovalDate'])
+    merged['exclusivity_yrs'] = ((
+        merged['ExclusDate'] - merged['ApprovalDate']
+    ).dt.days / 365.25).clip(lower=0)
+    orange = merged.groupby('trade_name', as_index=False)['exclusivity_yrs'].max()
     return orange
 
 # -----------------------------------------------------------------------------
