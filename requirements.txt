@@ -1,6 +1,12 @@
 streamlit
 pandas
 numpy
-plotly
-scipy
 requests
+pymc3
+arviz
+lifelines
+scikit-learn
+matplotlib
+seaborn
+prefect
+fpdf
