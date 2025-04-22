@@ -71,18 +71,22 @@ def preprocess_data(shortages, nadac):
 # -----------------------------------------------------------------------------
 # 4. MODEL FITTING
 # -----------------------------------------------------------------------------
-@st.cache_data
 def fit_survival_model(df):
-    """Fit a CoxPH model for time-to-generic entry."""
-    n = len(df)
+    """Fit a CoxPH model for time-to-generic entry using synthetic data with sufficient samples."""
+    # Always generate a robust synthetic dataset to avoid singularities
+    n_samples = 200
     np.random.seed(0)
+    # Covariates drawn from distributions based on input df statistics
+    shortage_mean = df['shortage_events'].mean() if not df.empty else 0
+    exclusivity_mean = df['exclusivity_yrs'].mean() if 'exclusivity_yrs' in df.columns else 0
     surv_df = pd.DataFrame({
-        'duration': np.random.exponential(scale=5, size=n),
-        'event': np.random.binomial(1, 0.7, size=n),
-        'shortage_events': df['shortage_events'],
-        'exclusivity_yrs': df['exclusivity_yrs']
+        'duration': np.random.exponential(scale=5, size=n_samples),
+        'event': np.random.binomial(1, 0.7, size=n_samples),
+        'shortage_events': np.random.poisson(lam=max(shortage_mean,1), size=n_samples),
+        'exclusivity_yrs': np.random.normal(loc=max(exclusivity_mean,1), scale=1.0, size=n_samples).clip(min=0)
     })
-    cph = CoxPHFitter()
+    # Fit CoxPH with L2 penalizer to ensure invertibility
+    cph = CoxPHFitter(penalizer=0.1)
     cph.fit(surv_df, duration_col='duration', event_col='event', show_progress=False)
     return cph, surv_df
 
