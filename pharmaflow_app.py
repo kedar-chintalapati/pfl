@@ -10,7 +10,8 @@ def fetch_shortage_data(limit=100):
     url = f"https://api.fda.gov/drug/shortages.json?limit={limit}"
     r = requests.get(url)
     data = r.json().get('results', [])
-    df = pd.json_normalize(data)
+    # flatten nested JSON into columns, dotted names for nested keys
+    df = pd.json_normalize(data, sep='.')
     return df
 
 # 2. Fetch Medicaid NADAC pricing data
@@ -35,80 +36,85 @@ def price_drop_mean(n):
     else:
         return 0.95
 
-# Main app
 st.title("PharmaFlow: Modeling FDA Policy Impacts on Drug Prices & Availability")
 
-# Section 1: Drug shortages
+# === Section 1: Live Drug Shortage Data ===
 st.markdown("## 1. Live Drug Shortage Data")
 shortage_df = fetch_shortage_data(100)
 if not shortage_df.empty:
-    st.dataframe(shortage_df[['product_type','product_name','dosage_form','route','manufacturer','status','report_date']])
-else:
-    st.write("No shortage data available at the moment.")
+    cols = shortage_df.columns
 
-# Section 2: NADAC pricing trends
+    # auto‑detect relevant fields
+    name_col    = next((c for c in cols if "product" in c.lower() and "name" in c.lower()), None)
+    dosage_col  = next((c for c in cols if "dosage" in c.lower()), None)
+    route_col   = next((c for c in cols if "route" in c.lower()), None)
+    manu_col    = next((c for c in cols if "manufacturer" in c.lower()), None)
+    date_col    = next((c for c in cols if "report_date" in c.lower() or "date" in c.lower()), None)
+
+    display_cols = [c for c in (name_col, dosage_col, route_col, manu_col, date_col) if c]
+
+    st.write("**Detected fields:**", display_cols)
+    st.dataframe(shortage_df[display_cols])
+else:
+    st.write("No shortage data available at the moment.")  # fallback
+
+# === Section 2: NADAC pricing trends ===
 st.markdown("## 2. Current Medicaid NADAC Pricing Trends")
 nadac_df = fetch_nadac_data()
-if 'NDC' in nadac_df.columns and 'NADAC Per Unit' in nadac_df.columns:
-    st.dataframe(nadac_df[['NDC','NADAC Per Unit','As of Date']].head(10))
-    baseline_price_mean = nadac_df['NADAC Per Unit'].mean()
+if "NDC" in nadac_df.columns and "NADAC Per Unit" in nadac_df.columns:
+    st.dataframe(nadac_df[["NDC", "NADAC Per Unit", "As of Date"]].head(10))
+    baseline_price_mean = nadac_df["NADAC Per Unit"].mean()
     st.markdown(f"**Average NADAC price per unit:** ${baseline_price_mean:.2f}")
 else:
     st.write("Unexpected NADAC data format.")
 
-# Sidebar controls
+# === Sidebar: Policy levers ===
 st.sidebar.header("Policy Levers & Simulation Parameters")
-new_exclusivity = st.sidebar.slider("New exclusivity period (years)", min_value=5.0, max_value=20.0, value=12.0, step=1.0)
-num_competitors = st.sidebar.slider("Expected number of generic competitors", min_value=1, max_value=10, value=1, step=1)
-horizon = st.sidebar.slider("Simulation horizon (years)", min_value=1, max_value=10, value=3, step=1)
-n_sim = st.sidebar.number_input("Number of Monte Carlo simulations", min_value=100, max_value=10000, value=1000, step=100)
+new_exclusivity = st.sidebar.slider("New exclusivity (years)", 5.0, 20.0, 12.0, 1.0)
+num_competitors = st.sidebar.slider("Number of generic competitors", 1, 10, 1, 1)
+horizon         = st.sidebar.slider("Simulation horizon (years)", 1, 10, 3, 1)
+n_sim           = st.sidebar.number_input("Monte Carlo sims", 100, 10000, 1000, 100)
 
 st.sidebar.markdown("### Sources")
-st.sidebar.markdown("- Live drug shortage data via openFDA API citeturn0search4")
-st.sidebar.markdown("- NADAC pricing data via Data.Medicaid.gov citeturn1search0")
-st.sidebar.markdown("- Generic competition & price drop study (FDA) citeturn6search7")
-st.sidebar.markdown("- Median generic entry delay study citeturn7search1")
+st.sidebar.markdown("- openFDA drug shortages docs :contentReference[oaicite:0]{index=0}")
+st.sidebar.markdown("- Medicaid NADAC CSV ")
+st.sidebar.markdown("- Generic competition & price‑drop meta‑analysis :contentReference[oaicite:1]{index=1}")
+st.sidebar.markdown("- Generic‑entry delay study ")
 
-# Section 3: Monte Carlo simulation
+# === Section 3: Monte Carlo Simulation ===
 st.markdown("## 3. Monte Carlo Simulation of Price Outcomes")
-entry_delay_mean = new_exclusivity
-entry_delay_sd = entry_delay_mean * (3.04/14.1)  # variability based on IQR study
-drop_mean = price_drop_mean(num_competitors)
-drop_sd = drop_mean * 0.1
+entry_mean = new_exclusivity
+entry_sd   = entry_mean * (3.04/14.1)   # based on IQR study
+drop_mean  = price_drop_mean(num_competitors)
+drop_sd    = drop_mean * 0.1
 
-time_points = np.linspace(0, horizon, num=50)
-price_ratios = np.zeros((n_sim, len(time_points)))
+time_pts   = np.linspace(0, horizon, 50)
+price_rat = np.zeros((n_sim, len(time_pts)))
 
 for i in range(n_sim):
-    entry = np.random.normal(entry_delay_mean, entry_delay_sd)
-    price_drop = np.random.normal(drop_mean, drop_sd)
-    price_drop = np.clip(price_drop, 0, 1)
-    for j, t in enumerate(time_points):
-        price_ratios[i, j] = 1.0 if t < entry else 1 - price_drop
+    entry     = np.random.normal(entry_mean, entry_sd)
+    drop_rate = np.clip(np.random.normal(drop_mean, drop_sd), 0, 1)
+    price_rat[i] = [1.0 if t < entry else 1 - drop_rate for t in time_pts]
 
-mean_price_ratio = price_ratios.mean(axis=0)
-st.line_chart(pd.DataFrame({"Average Price Ratio": mean_price_ratio}, index=time_points))
+mean_ratio = price_rat.mean(axis=0)
+st.line_chart(pd.DataFrame({"Avg Price Ratio": mean_ratio}, index=time_pts))
 
-# Summary at horizon
-final_ratios = price_ratios[:, -1]
-mean_drop = 1 - final_ratios.mean()
-ci_lower, ci_upper = np.percentile(final_ratios, [2.5, 97.5])
-ci_drop_lower = 1 - ci_upper
-ci_drop_upper = 1 - ci_lower
+# Confidence intervals at horizon
+final = price_rat[:, -1]
+mean_drop = 1 - final.mean()
+lower, upper = np.percentile(final, [2.5, 97.5])
+ci_lo = 1 - upper
+ci_hi = 1 - lower
 
-st.markdown(f"### Projected Price Drop at {horizon} years")
-st.markdown(f"- **Mean price drop:** {mean_drop*100:.1f}%")
-st.markdown(f"- **95% CI:** [{ci_drop_lower*100:.1f}%, {ci_drop_upper*100:.1f}%]")
+st.markdown(f"### Projected Price Drop at {horizon} years")
+st.markdown(f"- **Mean drop:** {mean_drop*100:.1f}%")
+st.markdown(f"- **95% CI:** [{ci_lo*100:.1f}%, {ci_hi*100:.1f}%]")
 
-# Interpretation
-st.markdown("### Interpretation")
-st.markdown("Prices remain constant until generic entry, after which they decline according to observed industry dynamics.")
-
-# Section 4: Caveats & next steps
+# === Section 4: Caveats & Next Steps ===
 st.markdown("## 4. Model Caveats & Next Steps")
-st.markdown('''
-- Price and entry time distributions are based on historical studies; actual outcomes may vary.
-- Collaborate with ICER and Kessel Run to refine model assumptions and parameter distributions.
-- Expand to distinguish small molecules vs biologics and include patent evergreening rules.
-- Incorporate supply-side dynamics to proactively model drug shortages.
-''')
+st.markdown("""
+- Distributions based on historical studies; real‑world may differ.
+- Partner with ICER & Kessel Run to refine parameters.
+- Distinguish small molecules vs biologics; model evergreening.
+- Add supply‑side dynamics to forecast shortages proactively.
+""")
