@@ -1,12 +1,24 @@
-streamlit
-pandas
-numpy
-requests
-pymc3
-arviz
-lifelines
-scikit-learn
-matplotlib
-seaborn
-prefect
-fpdf
+# Core app
+streamlit==1.44.1
+pandas==2.2.3
+numpy==2.2.5
+requests==2.32.3
+
+# Bayesian modeling
+pymc3==3.11.6
+arviz==0.21.0
+
+# Survival analysis & ML
+lifelines==0.30.0
+scikit-learn==1.6.1.post1
+
+# Plotting
+matplotlib==3.10.1
+seaborn==0.13.2
+
+# Orchestration & PDF export
+prefect==3.3.5
+fpdf==1.7.2
+
+# Backport to satisfy theano‑pymc build
+configparser==5.4.0
