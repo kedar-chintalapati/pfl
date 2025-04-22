@@ -5,3 +5,4 @@ numpy
 scikit-learn
 lifelines
 matplotlib
+beautifulsoup4
